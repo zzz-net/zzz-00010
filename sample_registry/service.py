@@ -155,13 +155,8 @@ class SampleService:
         if sample["status"] == new_status:
             return False, "状态未变化"
 
-        exception_type = ""
-        if sample["status"] == "RETURNED" and new_status == "STORED" and not force:
-            exception_type = "RETURNED_TO_STORED"
-            remark = f"{remark} [异常: 退回样本直接入库]".strip()
-
         return self.db.update_sample_status(
-            sample_id, new_status, operator, remark, exception_type, force
+            sample_id, new_status, operator, remark, "", force
         )
 
     def get_samples(self, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:

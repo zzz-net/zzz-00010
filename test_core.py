@@ -127,14 +127,31 @@ def test_status_transition():
     ok, msg = service.transition_status(sample_id2, "RETURNED", "admin", "退回")
     assert ok, msg
 
-    ok, msg = service.transition_status(sample_id2, "STORED", "admin", "异常入库")
-    assert ok, f"退回→入库流转失败: {msg}"
-    print(f"  ✓ 异常流转记录: RETURNED → STORED (标记异常)")
+    ok, msg = service.transition_status(sample_id2, "STORED", "admin", "尝试直接入库")
+    assert not ok, "退回样本直接入库应该被禁止"
+    assert "不能直接入库" in msg
+    print(f"  ✓ 退回样本直接入库已被禁止: {msg}")
+
+    sample = service.db.get_sample_by_id(sample_id2)
+    assert sample["status"] == "RETURNED", "状态应保持 RETURNED"
+    print(f"  ✓ 状态未被修改: {sample['status']}")
 
     _, history = service.get_sample_timeline(sample_id2)
-    has_exception = any(h.get("exception_type") == "RETURNED_TO_STORED" for h in history)
-    assert has_exception, "异常类型未记录"
-    print(f"  ✓ 异常类型已记录: RETURNED_TO_STORED")
+    store_attempts = [h for h in history if h["to_status"] == "STORED"]
+    assert len(store_attempts) == 0, "历史记录不应包含 STORED 记录"
+    print(f"  ✓ 历史记录未被污染: 共 {len(history)} 条记录，无 STORED 记录")
+
+    ok, msg = service.transition_status(sample_id2, "RECEIVED", "admin", "重新接收")
+    assert ok, f"重新接收应该成功: {msg}"
+    print(f"  ✓ 重新接收成功: RETURNED → RECEIVED")
+
+    ok, msg = service.transition_status(sample_id2, "STORED", "admin", "正常入库")
+    assert ok, f"重新接收后入库应该成功: {msg}"
+    print(f"  ✓ 重新接收后正常入库: RECEIVED → STORED")
+
+    sample = service.db.get_sample_by_id(sample_id2)
+    assert sample["status"] == "STORED"
+    print(f"  ✓ 最终状态: {sample['status']}")
 
     print("  状态流转测试通过 ✓\n")
 

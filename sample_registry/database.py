@@ -147,6 +147,10 @@ class Database:
             if filters.get("status"):
                 query += " AND status = ?"
                 params.append(filters["status"])
+            if filters.get("status__in") and isinstance(filters["status__in"], list) and filters["status__in"]:
+                placeholders = ",".join(["?"] * len(filters["status__in"]))
+                query += f" AND status IN ({placeholders})"
+                params.extend(filters["status__in"])
             if filters.get("project"):
                 query += " AND project LIKE ?"
                 params.append(f"%{filters['project']}%")
@@ -192,15 +196,14 @@ class Database:
             "RECEIVED": ["PENDING_INFO", "STORED", "RETURNED", "VOIDED"],
             "PENDING_INFO": ["STORED", "RETURNED", "VOIDED"],
             "STORED": ["VOIDED"],
-            "RETURNED": ["STORED", "VOIDED"],
+            "RETURNED": ["RECEIVED", "VOIDED"],
             "VOIDED": []
         }
 
         if not force and new_status not in valid_transitions.get(old_status, []):
+            if old_status == "RETURNED" and new_status == "STORED":
+                return False, "已退回样本不能直接入库，请先执行重新接收操作"
             return False, f"不允许从 {old_status} 直接流转到 {new_status}"
-
-        if not force and old_status == "RETURNED" and new_status == "STORED":
-            exception_type = exception_type or "RETURNED_TO_STORED"
 
         try:
             with self._get_conn() as conn:

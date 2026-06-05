@@ -123,6 +123,8 @@ class SampleRegistryApp:
         action_frame.pack(fill=tk.X)
 
         ttk.Label(action_frame, text="选中样本操作:").pack(side=tk.LEFT)
+        self.btn_receive = ttk.Button(action_frame, text="← 重新接收", command=lambda: self._transition_status("RECEIVED"), state=tk.DISABLED)
+        self.btn_receive.pack(side=tk.LEFT, padx=3)
         self.btn_pending = ttk.Button(action_frame, text="→ 待补资料", command=lambda: self._transition_status("PENDING_INFO"), state=tk.DISABLED)
         self.btn_pending.pack(side=tk.LEFT, padx=3)
         self.btn_store = ttk.Button(action_frame, text="→ 已入库", command=lambda: self._transition_status("STORED"), state=tk.DISABLED)
@@ -247,7 +249,7 @@ class SampleRegistryApp:
         if has_selection:
             sample = self.service.db.get_sample_by_id(self.selected_sample_id)
 
-        for btn in [self.btn_pending, self.btn_store, self.btn_return, self.btn_void, self.btn_notes, self.btn_timeline]:
+        for btn in [self.btn_receive, self.btn_pending, self.btn_store, self.btn_return, self.btn_void, self.btn_notes, self.btn_timeline]:
             btn.config(state=tk.NORMAL if has_selection else tk.DISABLED)
 
         if sample:
@@ -256,10 +258,11 @@ class SampleRegistryApp:
                 "RECEIVED": ["PENDING_INFO", "STORED", "RETURNED", "VOIDED"],
                 "PENDING_INFO": ["STORED", "RETURNED", "VOIDED"],
                 "STORED": ["VOIDED"],
-                "RETURNED": ["STORED", "VOIDED"],
+                "RETURNED": ["RECEIVED", "VOIDED"],
                 "VOIDED": []
             }
             valid = valid_transitions.get(status, [])
+            self.btn_receive.config(state=tk.NORMAL if "RECEIVED" in valid else tk.DISABLED)
             self.btn_pending.config(state=tk.NORMAL if "PENDING_INFO" in valid else tk.DISABLED)
             self.btn_store.config(state=tk.NORMAL if "STORED" in valid else tk.DISABLED)
             self.btn_return.config(state=tk.NORMAL if "RETURNED" in valid else tk.DISABLED)
