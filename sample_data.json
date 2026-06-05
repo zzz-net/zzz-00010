@@ -1,0 +1,49 @@
+{
+  "samples": [
+    {
+      "sample_no": "JSON-001",
+      "project": "肿瘤标志物",
+      "quantity": 5,
+      "receiver": "张三",
+      "location": "冰箱D-第1层",
+      "damage_note": "",
+      "missing_tube_note": ""
+    },
+    {
+      "sample_no": "JSON-002",
+      "project": "甲状腺功能",
+      "quantity": 3,
+      "receiver": "李四",
+      "location": "冰箱D-第2层",
+      "damage_note": "标签脱落",
+      "missing_tube_note": ""
+    },
+    {
+      "sample_no": "JSON-003",
+      "project": "激素检测",
+      "quantity": 7,
+      "receiver": "王五",
+      "location": "冰箱D-第1层",
+      "damage_note": "",
+      "missing_tube_note": "缺少1管"
+    },
+    {
+      "sample_no": "JSON-004",
+      "project": "过敏原检测",
+      "quantity": 4,
+      "receiver": "赵六",
+      "location": "冰箱E-第1层",
+      "damage_note": "",
+      "missing_tube_note": ""
+    },
+    {
+      "sample_no": "JSON-005",
+      "project": "自身抗体",
+      "quantity": 6,
+      "receiver": "张三",
+      "location": "冰箱E-第2层",
+      "damage_note": "样本管有裂纹",
+      "missing_tube_note": ""
+    }
+  ]
+}
