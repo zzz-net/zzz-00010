@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_registry.db")
+DB_VERSION = 2
 
 
 class Database:
@@ -17,6 +18,7 @@ class Database:
             cls._instance = super().__new__(cls)
             cls._instance.db_path = db_path
             cls._instance._init_db()
+            cls._instance._migrate_db()
         return cls._instance
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -65,6 +67,25 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_history_sample_id ON sample_history(sample_id);
             """)
 
+    def _migrate_db(self) -> None:
+        with self._get_conn() as conn:
+            current_version = self.get_config("db_version", 1)
+
+            if current_version < 2:
+                self._migrate_to_v2(conn)
+                self.set_config("db_version", 2)
+
+    def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
+        try:
+            conn.execute("ALTER TABLE samples ADD COLUMN batch_no TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_batch_no ON samples(batch_no)")
+        except sqlite3.OperationalError:
+            pass
+
     def get_config(self, key: str, default: Any = None) -> Any:
         with self._get_conn() as conn:
             row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
@@ -88,15 +109,24 @@ class Database:
 
         existing = self.get_sample_by_no(sample_data["sample_no"])
         if existing:
-            return False, f"样本编号 {sample_data['sample_no']} 已存在", None
+            existing_batch = existing.get("batch_no") or ""
+            new_batch = sample_data.get("batch_no") or ""
+            if existing_batch and new_batch and existing_batch != new_batch:
+                return False, f"样本编号 {sample_data['sample_no']} 已存在（现有批次号：{existing_batch}，导入批次号：{new_batch}）", None
+            elif existing_batch:
+                return False, f"样本编号 {sample_data['sample_no']} 已存在（现有批次号：{existing_batch}）", None
+            elif new_batch:
+                return False, f"样本编号 {sample_data['sample_no']} 已存在（导入批次号：{new_batch}）", None
+            else:
+                return False, f"样本编号 {sample_data['sample_no']} 已存在", None
 
         try:
             with self._get_conn() as conn:
                 cur = conn.execute(
                     """INSERT INTO samples 
                        (sample_no, project, quantity, receiver, location, status,
-                        damage_note, missing_tube_note, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        damage_note, missing_tube_note, batch_no, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         sample_data["sample_no"],
                         sample_data["project"],
@@ -106,6 +136,7 @@ class Database:
                         "RECEIVED",
                         sample_data.get("damage_note"),
                         sample_data.get("missing_tube_note"),
+                        sample_data.get("batch_no"),
                         now,
                         now
                     )
@@ -139,7 +170,7 @@ class Database:
             return dict(row) if row else None
 
     def get_samples(self, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """获取样本列表，支持按状态、项目、日期范围筛选"""
+        """获取样本列表，支持按状态、项目、日期范围、批次号筛选"""
         query = "SELECT * FROM samples WHERE 1=1"
         params: List[Any] = []
 
@@ -154,6 +185,14 @@ class Database:
             if filters.get("project"):
                 query += " AND project LIKE ?"
                 params.append(f"%{filters['project']}%")
+            if filters.get("batch_no"):
+                batch_no = filters["batch_no"]
+                if filters.get("batch_no_exact", False):
+                    query += " AND batch_no = ?"
+                    params.append(batch_no)
+                else:
+                    query += " AND batch_no LIKE ?"
+                    params.append(f"%{batch_no}%")
             if filters.get("date_from"):
                 query += " AND date(created_at) >= date(?)"
                 params.append(filters["date_from"])
@@ -265,3 +304,10 @@ class Database:
                 "SELECT DISTINCT project FROM samples ORDER BY project"
             ).fetchall()
             return [row["project"] for row in rows]
+
+    def get_all_batch_nos(self) -> List[str]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT batch_no FROM samples WHERE batch_no IS NOT NULL AND batch_no != '' ORDER BY batch_no"
+            ).fetchall()
+            return [row["batch_no"] for row in rows]

@@ -55,6 +55,17 @@ class IOHandler:
         if missing_fields:
             return False, f"CSV 缺少必需列: {', '.join(missing_fields)}", {}
 
+        for row in samples_data:
+            if "批次号" in row and "batch_no" not in row:
+                row["batch_no"] = row["批次号"]
+            elif "batch_no" in row and "批次号" not in row:
+                row["批次号"] = row["batch_no"]
+
+            if "batch_no" in row and not row["batch_no"]:
+                del row["batch_no"]
+            if "批次号" in row and not row["批次号"]:
+                del row["批次号"]
+
         return self.service.bulk_import_samples(samples_data, operator, skip_errors)
 
     def import_from_json(self, file_path: str, operator: str, skip_errors: bool = False) -> Tuple[bool, str, Dict[str, Any]]:
@@ -83,6 +94,17 @@ class IOHandler:
         if not samples_data:
             return False, "JSON 数据为空", {}
 
+        for row in samples_data:
+            if "批次号" in row and "batch_no" not in row:
+                row["batch_no"] = row["批次号"]
+            elif "batch_no" in row and "批次号" not in row:
+                row["批次号"] = row["batch_no"]
+
+            if "batch_no" in row and not row["batch_no"]:
+                del row["batch_no"]
+            if "批次号" in row and not row["批次号"]:
+                del row["批次号"]
+
         return self.service.bulk_import_samples(samples_data, operator, skip_errors)
 
     def export_to_csv(
@@ -109,7 +131,7 @@ class IOHandler:
         try:
             with open(temp_path, "w", encoding="utf-8-sig", newline="") as f:
                 fieldnames = [
-                    "样本编号", "项目", "数量", "接收人", "存放位置",
+                    "样本编号", "批次号", "项目", "数量", "接收人", "存放位置",
                     "状态", "破损备注", "缺管备注", "创建时间", "更新时间"
                 ]
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -118,6 +140,7 @@ class IOHandler:
                 for s in samples:
                     writer.writerow({
                         "样本编号": s.get("sample_no", ""),
+                        "批次号": s.get("batch_no", ""),
                         "项目": s.get("project", ""),
                         "数量": s.get("quantity", ""),
                         "接收人": s.get("receiver", ""),
@@ -193,6 +216,7 @@ class IOHandler:
             for s in samples:
                 item = {
                     "sample_no": s.get("sample_no", ""),
+                    "batch_no": s.get("batch_no", ""),
                     "project": s.get("project", ""),
                     "quantity": s.get("quantity", ""),
                     "receiver": s.get("receiver", ""),

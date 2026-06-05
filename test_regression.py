@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import shutil
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -864,6 +865,646 @@ def test_readme_documentation_consistency():
             pass
 
 
+def test_database_migration():
+    """测试：旧库迁移 - 从v1升级到v2，添加batch_no字段，旧样本批次号为空"""
+    print("=" * 70)
+    print("回归测试 7: 数据库迁移 - 旧库升级兼容性")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_7.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_no TEXT NOT NULL UNIQUE,
+                project TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                receiver TEXT NOT NULL,
+                location TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'RECEIVED',
+                damage_note TEXT,
+                missing_tube_note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sample_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_id INTEGER NOT NULL,
+                from_status TEXT NOT NULL,
+                to_status TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                remark TEXT,
+                exception_type TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (sample_id) REFERENCES samples(id) ON DELETE CASCADE
+            );
+            CREATE TABLE config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+        conn.execute("""
+            INSERT INTO samples 
+            (sample_no, project, quantity, receiver, location, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, ("OLD-SAMPLE-001", "旧库测试项目", 10, "旧库测试员", "旧库位置", "2024-01-01T00:00:00", "2024-01-01T00:00:00"))
+        conn.commit()
+        conn.close()
+        print("  ✓ 创建v1版本数据库，插入旧样本（无batch_no字段")
+
+        Database._instance = None
+        db = Database(db_path)
+
+        sample = db.get_sample_by_no("OLD-SAMPLE-001")
+        assert sample is not None, "旧样本应该存在"
+        assert "batch_no" in sample, "迁移后应该包含batch_no字段"
+        assert sample["batch_no"] is None or sample["batch_no"] == "", "旧样本的batch_no应该为空"
+        print(f"  ✓ 旧样本迁移成功: batch_no = {repr(sample['batch_no'])}")
+
+        version = db.get_config("db_version", 0)
+        assert version == 2, f"数据库版本应该升级到2"
+        print(f"  ✓ 数据库版本已升级到: {version}")
+
+        new_data = {
+            "sample_no": "NEW-SAMPLE-001",
+            "project": "新项目",
+            "quantity": 5,
+            "receiver": "测试员",
+            "location": "新位置",
+            "batch_no": "BATCH-2024-001"
+        }
+        ok, msg, sample_id = db.insert_sample(new_data, "admin")
+        assert ok, f"新样本插入失败: {msg}"
+        print(f"  ✓ 新样本插入成功，批次号: {new_data['batch_no']}")
+
+        new_sample = db.get_sample_by_id(sample_id)
+        assert new_sample["batch_no"] == "BATCH-2024-001", "新样本的batch_no应该正确"
+        print(f"  ✓ 新样本批次号验证: {new_sample['batch_no']}")
+
+        all_samples = db.get_samples()
+        assert len(all_samples) == 2, "应该有2条样本"
+        print(f"  ✓ 总样本数: {len(all_samples)}")
+
+        batch_nos = db.get_all_batch_nos()
+        assert len(batch_nos) == 1, "应该只有1个批次号（空批次不返回）"
+        assert batch_nos[0] == "BATCH-2024-001", "批次号应该正确"
+        print(f"  ✓ get_all_batch_nos 返回: {batch_nos}")
+
+        Database._instance = None
+        db2 = Database(db_path)
+        sample_after_restart = db2.get_sample_by_no("OLD-SAMPLE-001")
+        assert sample_after_restart["batch_no"] is None or sample_after_restart["batch_no"] == "", "重启后旧样本批次号仍为空"
+        print(f"  ✓ 重启后旧样本批次号: {repr(sample_after_restart['batch_no'])}")
+        print("\n  回归测试 7 通过 ✓\n")
+        return True
+
+    finally:
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+
+
+def test_batch_no_filter():
+    """测试：批次号筛选 - 精确查询和模糊查询"""
+    print("=" * 70)
+    print("回归测试 8: 批次号筛选 - 精确/模糊查询")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_8.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    try:
+        Database._instance = None
+        db = Database(db_path)
+        service = SampleService()
+
+        samples_data = [
+            {"sample_no": "BAT-001", "project": "筛选测试", "quantity": 1, "receiver": "测试员", "location": "位置1", "batch_no": "BATCH-A-001"},
+            {"sample_no": "BAT-002", "project": "筛选测试", "quantity": 2, "receiver": "测试员", "location": "位置2", "batch_no": "BATCH-A-002"},
+            {"sample_no": "BAT-003", "project": "筛选测试", "quantity": 3, "receiver": "测试员", "location": "位置3", "batch_no": "BATCH-B-001"},
+            {"sample_no": "BAT-004", "project": "筛选测试", "quantity": 4, "receiver": "测试员", "location": "位置4", "batch_no": "BATCH-B-002"},
+            {"sample_no": "BAT-005", "project": "筛选测试", "quantity": 5, "receiver": "测试员", "location": "位置5"},
+        ]
+
+        for data in samples_data:
+            ok, msg, sid = db.insert_sample(data, "admin")
+            assert ok, msg
+
+        print(f"  ✓ 插入5条样本（4条有批次号，1条无批次号")
+
+        print("\n  测试精确查询 batch_no=BATCH-A-001:")
+        filters = {"batch_no": "BATCH-A-001", "batch_no_exact": True}
+        result = db.get_samples(filters)
+        nos = sorted([s["sample_no"] for s in result])
+        print(f"    查询结果: {nos}")
+        assert len(result) == 1, f"精确查询应返回1条，实际{len(result)}条"
+        assert "BAT-001" in nos
+        print("    ✓ 精确查询正确")
+
+        print("\n  测试模糊查询 batch_no=BATCH-A:")
+        filters = {"batch_no": "BATCH-A", "batch_no_exact": False}
+        result = db.get_samples(filters)
+        nos = sorted([s["sample_no"] for s in result])
+        print(f"    查询结果: {nos}")
+        assert len(result) == 2, f"模糊查询应返回2条，实际{len(result)}条"
+        assert "BAT-001" in nos and "BAT-002" in nos
+        print("    ✓ 模糊查询正确（匹配BATCH-A前缀")
+
+        print("\n  测试模糊查询 batch_no=001:")
+        filters = {"batch_no": "001", "batch_no_exact": False}
+        result = db.get_samples(filters)
+        nos = sorted([s["sample_no"] for s in result])
+        print(f"    查询结果: {nos}")
+        assert len(result) == 2, f"模糊查询应返回2条，实际{len(result)}条"
+        assert "BAT-001" in nos and "BAT-003" in nos
+        print("    ✓ 模糊查询正确（匹配包含001的批次号）")
+
+        print("\n  测试精确查询不存在的批次号:")
+        filters = {"batch_no": "NOT-EXIST", "batch_no_exact": True}
+        result = db.get_samples(filters)
+        print(f"    查询结果: {len(result)} 条")
+        assert len(result) == 0, "查询不存在的批次号应返回空"
+        print("    ✓ 查询不存在的批次号返回空")
+
+        print("\n  测试无批次号的样本（batch_no为空的样本):")
+        filters = {"batch_no": "BATCH", "batch_no_exact": False}
+        result = db.get_samples(filters)
+        nos = sorted([s["sample_no"] for s in result])
+        print(f"    查询结果: {nos}")
+        assert len(result) == 4, f"模糊查询BATCH应返回4条，实际{len(result)}条"
+        assert "BAT-005" not in nos, "无批次号的样本不应被匹配"
+        print("    ✓ 无批次号样本不会被模糊查询匹配到")
+
+        print("\n  测试组合筛选（批次号+状态):")
+        filters = {"batch_no": "BATCH-A", "status": "RECEIVED"}
+        result = db.get_samples(filters)
+        nos = sorted([s["sample_no"] for s in result])
+        print(f"    查询结果: {nos}")
+        assert len(result) == 2, f"组合查询应返回2条，实际{len(result)}条"
+        print("    ✓ 组合筛选正确")
+
+        Database._instance = None
+        db2 = Database(db_path)
+        filters = {"batch_no": "BATCH-A", "batch_no_exact": False}
+        result_after = db2.get_samples(filters)
+        assert len(result_after) == 2, "重启后筛选结果应一致"
+        print(f"\n  ✓ 重启后筛选结果一致: {len(result_after)} 条")
+
+        all_batch_nos = db2.get_all_batch_nos()
+        print(f"\n  所有批次号列表: {all_batch_nos}")
+        assert len(all_batch_nos) == 4, "应该有4个不重复的批次号"
+        print("  ✓ get_all_batch_nos 正确")
+
+        print("\n  回归测试 8 通过 ✓\n")
+        return True
+
+    finally:
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+
+
+def test_batch_no_import_export():
+    """测试：批次号导入导出 - CSV/JSON导入导出，包含历史"""
+    print("=" * 70)
+    print("回归测试 9: 批次号导入导出 - CSV/JSON")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_9.db")
+    temp_dir = tempfile.mkdtemp()
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    try:
+        Database._instance = None
+        db = Database(db_path)
+        service = SampleService()
+
+        from sample_registry.io_handler import IOHandler
+        io = IOHandler(service)
+
+        csv_content = """sample_no,批次号,project,quantity,receiver,location
+IMP-CSV-001,BATCH-CSV-001,CSV导入项目,5,测试员,位置A
+IMP-CSV-002,BATCH-CSV-002,CSV导入项目,10,测试员,位置B
+IMP-CSV-003,,CSV导入项目,3,测试员,位置C
+"""
+        csv_file = os.path.join(temp_dir, "test_import.csv")
+        with open(csv_file, "w", encoding="utf-8-sig") as f:
+            f.write(csv_content)
+        print("  ✓ 创建CSV测试文件（使用\"批次号\"列名）")
+
+        ok, msg, details = io.import_from_csv(csv_file, "admin", skip_errors=False)
+        assert ok, f"CSV导入失败: {msg}"
+        assert details["success"] == 3, f"应该成功导入3条，实际{details['success']}条"
+        print(f"  ✓ CSV导入成功: {details['success']} 条")
+
+        sample1 = db.get_sample_by_no("IMP-CSV-001")
+        assert sample1["batch_no"] == "BATCH-CSV-001", f"批次号不正确: {sample1['batch_no']}"
+        sample3 = db.get_sample_by_no("IMP-CSV-003")
+        assert sample3.get("batch_no") is None or sample3["batch_no"] == "", "无批次号的应该为空"
+        print("  ✓ CSV导入批次号正确")
+
+        json_content = """[
+            {"sample_no": "IMP-JSON-001", "batch_no": "BATCH-JSON-001", "project": "JSON导入项目", "quantity": 5, "receiver": "测试员", "location": "位置A"},
+            {"sample_no": "IMP-JSON-002", "batch_no": "BATCH-JSON-002", "project": "JSON导入项目", "quantity": 10, "receiver": "测试员", "location": "位置B"},
+            {"sample_no": "IMP-JSON-003", "project": "JSON导入项目", "quantity": 3, "receiver": "测试员", "location": "位置C"}
+        ]"""
+        json_file = os.path.join(temp_dir, "test_import.json")
+        with open(json_file, "w", encoding="utf-8") as f:
+            f.write(json_content)
+        print("\n  ✓ 创建JSON测试文件（使用batch_no字段）")
+
+        ok, msg, details = io.import_from_json(json_file, "admin", skip_errors=False)
+        assert ok, f"JSON导入失败: {msg}"
+        assert details["success"] == 3, f"应该成功导入3条，实际{details['success']}条"
+        print(f"  ✓ JSON导入成功: {details['success']} 条")
+
+        sample4 = db.get_sample_by_no("IMP-JSON-001")
+        assert sample4["batch_no"] == "BATCH-JSON-001", f"批次号不正确: {sample4['batch_no']}"
+        print("  ✓ JSON导入批次号正确")
+
+        print("\n  测试CSV导出:")
+        ok, msg, export_file = io.export_samples(temp_dir, "csv", {"batch_no": "BATCH-CSV", "batch_no_exact": False}, include_history=True)
+        assert ok, f"CSV导出失败: {msg}"
+        print(f"  ✓ CSV导出成功: {export_file}")
+
+        with open(export_file, "r", encoding="utf-8-sig") as f:
+            csv_lines = f.readlines()
+        header = csv_lines[0].strip()
+        print(f"    CSV表头: {header}")
+        assert "批次号" in header, "CSV导出应该包含批次号列"
+        print("    ✓ CSV导出包含批次号列")
+
+        batch_values = []
+        for line in csv_lines[1:]:
+            line = line.strip()
+            if not line or line.startswith("---"):
+                break
+            parts = line.split(",")
+            if len(parts) >= 2:
+                batch_values.append(parts[1])
+        print(f"    批次号值: {batch_values}")
+        assert "BATCH-CSV-001" in batch_values
+        assert "BATCH-CSV-002" in batch_values
+        assert len(batch_values) == 2, f"筛选结果应为2条，实际{len(batch_values)}条"
+        print("    ✓ CSV导出批次号值正确")
+
+        print("\n  测试JSON导出:")
+        ok, msg, export_file = io.export_samples(temp_dir, "json", {"batch_no": "BATCH-JSON", "batch_no_exact": False}, include_history=True)
+        assert ok, f"JSON导出失败: {msg}"
+        print(f"  ✓ JSON导出成功: {export_file}")
+
+        import json
+        with open(export_file, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
+
+        assert "samples" in json_data
+        assert len(json_data["samples"]) == 2
+        for s in json_data["samples"]:
+            assert "batch_no" in s, "JSON导出应该包含batch_no字段"
+        batch_nos = [s["batch_no"] for s in json_data["samples"]]
+        print(f"    批次号值: {batch_nos}")
+        assert "BATCH-JSON-001" in batch_nos
+        assert "BATCH-JSON-002" in batch_nos
+        print("    ✓ JSON导出批次号字段和值正确")
+
+        print("\n  测试导出配置持久化:")
+        config = service.get_export_config()
+        print(f"    保存的导出配置: {config}")
+        assert "filters" in config
+        assert config["filters"].get("batch_no") == "BATCH-JSON"
+        assert config["format"] == "json"
+        print("    ✓ 导出配置包含批次号筛选条件")
+
+        Database._instance = None
+        db2 = Database(db_path)
+        service2 = SampleService()
+        config_after = service2.get_export_config()
+        assert config_after["filters"].get("batch_no") == "BATCH-JSON", "重启后导出配置应恢复"
+        print(f"  ✓ 重启后导出配置恢复成功")
+
+        print("\n  测试旧格式文件兼容（无批次号列）:")
+        old_csv_content = """sample_no,project,quantity,receiver,location
+OLD-CSV-001,旧格式项目,5,测试员,位置
+"""
+        old_csv_file = os.path.join(temp_dir, "test_old_format.csv")
+        with open(old_csv_file, "w", encoding="utf-8-sig") as f:
+            f.write(old_csv_content)
+
+        ok, msg, details = io.import_from_csv(old_csv_file, "admin", skip_errors=False)
+        assert ok, f"旧格式CSV导入失败: {msg}"
+        assert details["success"] == 1
+        old_sample = db2.get_sample_by_no("OLD-CSV-001")
+        assert old_sample.get("batch_no") is None or old_sample["batch_no"] == "", "旧格式导入批次号应该为空"
+        print("  ✓ 旧格式CSV导入兼容，批次号为空")
+
+        print("\n  回归测试 9 通过 ✓\n")
+        return True
+
+    finally:
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+
+
+def test_batch_no_conflict():
+    """测试：重复导入冲突 - 同样本号不同批次号也按样本号冲突拒绝"""
+    print("=" * 70)
+    print("回归测试 10: 重复导入冲突检测")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_10.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    try:
+        Database._instance = None
+        db = Database(db_path)
+        service = SampleService()
+
+        data1 = {
+            "sample_no": "CONFLICT-001",
+            "project": "冲突测试项目",
+            "quantity": 5,
+            "receiver": "测试员",
+            "location": "位置A",
+            "batch_no": "BATCH-OLD-001"
+        }
+
+        ok, msg, sample_id = db.insert_sample(data1, "admin")
+        assert ok, f"首次插入失败: {msg}"
+        print(f"  ✓ 首次插入成功: 样本号={data1['sample_no']}, 批次号={data1['batch_no']}")
+
+        print("\n  测试1: 同样本号同样批次号:")
+        data2 = dict(data1)
+        data2["batch_no"] = "BATCH-OLD-001"
+        ok, msg, _ = db.insert_sample(data2, "admin")
+        assert not ok, "同样本号应该失败"
+        assert "已存在" in msg
+        assert "BATCH-OLD-001" in msg
+        print(f"    错误消息: {msg}")
+        print("    ✓ 同样本号同样批次号被拒绝，消息包含批次号信息")
+
+        print("\n  测试2: 同样本号不同批次号:")
+        data3 = dict(data1)
+        data3["batch_no"] = "BATCH-NEW-001"
+        ok, msg, _ = db.insert_sample(data3, "admin")
+        assert not ok, "同样本号不同批次号也应该失败"
+        assert "已存在" in msg
+        assert "现有批次号：BATCH-OLD-001" in msg
+        assert "导入批次号：BATCH-NEW-001" in msg
+        print(f"    错误消息: {msg}")
+        print("    ✓ 同样本号不同批次号被拒绝，消息清楚显示两个批次号对比")
+
+        print("\n  测试3: 新样本有批次号，旧样本无批次号:")
+        data_no_batch = {
+            "sample_no": "CONFLICT-002",
+            "project": "冲突测试项目",
+            "quantity": 10,
+            "receiver": "测试员",
+            "location": "位置B"
+        }
+        ok, msg, sample_id2 = db.insert_sample(data_no_batch, "admin")
+        assert ok, f"无批次号样本插入失败: {msg}"
+        print(f"  ✓ 插入无批次号样本成功: {data_no_batch['sample_no']}")
+
+        data_with_batch = dict(data_no_batch)
+        data_with_batch["batch_no"] = "BATCH-NEW-002"
+        ok, msg, _ = db.insert_sample(data_with_batch, "admin")
+        assert not ok, "同样本号应该失败"
+        assert "已存在" in msg
+        assert "导入批次号：BATCH-NEW-002" in msg
+        print(f"    错误消息: {msg}")
+        print("    ✓ 新样本有批次号，旧样本无批次号也按样本号冲突拒绝")
+
+        print("\n  测试4: 旧样本有批次号，新样本无批次号:")
+        data_with_batch2 = {
+            "sample_no": "CONFLICT-003",
+            "project": "冲突测试项目",
+            "quantity": 3,
+            "receiver": "测试员",
+            "location": "位置C",
+            "batch_no": "BATCH-OLD-003"
+        }
+        ok, msg, sample_id3 = db.insert_sample(data_with_batch2, "admin")
+        assert ok, f"有批次号样本插入失败: {msg}"
+        print(f"  ✓ 插入有批次号样本成功: {data_with_batch2['sample_no']}")
+
+        data_no_batch2 = dict(data_with_batch2)
+        if "batch_no" in data_no_batch2:
+            del data_no_batch2["batch_no"]
+        ok, msg, _ = db.insert_sample(data_no_batch2, "admin")
+        assert not ok, "同样本号应该失败"
+        assert "已存在" in msg
+        assert "现有批次号：BATCH-OLD-003" in msg
+        print(f"    错误消息: {msg}")
+        print("    ✓ 旧样本有批次号，新样本无批次号也按样本号冲突拒绝")
+
+        print("\n  测试5: 批量导入时的冲突检测:")
+        bulk_data = [
+            {"sample_no": "CONFLICT-001", "project": "批量冲突", "quantity": 1, "receiver": "测试员", "location": "位置D", "batch_no": "BATCH-BULK-001"},
+            {"sample_no": "NEW-BULK-001", "project": "批量冲突", "quantity": 2, "receiver": "测试员", "location": "位置D", "batch_no": "BATCH-BULK-002"},
+        ]
+        ok, msg, details = service.bulk_import_samples(bulk_data, "admin", skip_errors=True)
+        print(f"    结果: 成功{details['success']}条, 失败{details['failed']}条")
+        assert details["success"] == 1, "应该成功1条"
+        assert details["failed"] == 1, "应该失败1条"
+        assert "CONFLICT-001" in details["errors"][0]
+        assert "BATCH-OLD-001" in details["errors"][0]
+        print("    ✓ 批量导入时冲突检测正确，错误消息包含批次号信息")
+
+        sample_after = db.get_sample_by_no("CONFLICT-001")
+        assert sample_after["batch_no"] == "BATCH-OLD-001", "原有样本批次号不应被修改"
+        print(f"  ✓ 原有样本批次号未被修改: {sample_after['batch_no']}")
+
+        print("\n  回归测试 10 通过 ✓\n")
+        return True
+
+    finally:
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+
+
+def test_config_persistence():
+    """测试：配置持久化 - 筛选条件和导出配置重启后恢复"""
+    print("=" * 70)
+    print("回归测试 11: 配置持久化 - 筛选和导出配置重启恢复")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_11.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    try:
+        Database._instance = None
+        db = Database(db_path)
+        service = SampleService()
+
+        samples_data = [
+            {"sample_no": "PERSIST-001", "project": "持久化测试", "quantity": 1, "receiver": "测试员", "location": "位置1", "batch_no": "BATCH-P-001"},
+            {"sample_no": "PERSIST-002", "project": "持久化测试", "quantity": 2, "receiver": "测试员", "location": "位置2", "batch_no": "BATCH-P-002"},
+            {"sample_no": "PERSIST-003", "project": "持久化测试", "quantity": 3, "receiver": "测试员", "location": "位置3"},
+        ]
+
+        for data in samples_data:
+            ok, msg, sid = db.insert_sample(data, "admin")
+            assert ok, msg
+
+        print(f"  ✓ 插入3条样本")
+
+        print("\n  保存筛选配置（包含批次号模糊查询）:")
+        filters = {
+            "status": "RECEIVED",
+            "project": "持久化",
+            "batch_no": "BATCH-P",
+            "batch_no_exact": False
+        }
+        service.save_filter_config(filters)
+        print(f"    保存的筛选配置: {filters}")
+
+        export_config = {
+            "directory": "/test/export",
+            "format": "json",
+            "filters": filters
+        }
+        service.save_export_config(export_config)
+        print(f"    保存的导出配置: {export_config}")
+
+        print("\n  模拟重启（重建数据库连接:")
+        Database._instance = None
+        db2 = Database(db_path)
+        service2 = SampleService()
+
+        restored_filters = service2.get_filter_config()
+        print(f"    恢复的筛选配置: {restored_filters}")
+        assert restored_filters.get("batch_no") == "BATCH-P", "批次号筛选条件应恢复"
+        assert restored_filters.get("batch_no_exact") == False, "精确匹配标志应恢复"
+        assert restored_filters.get("status") == "RECEIVED", "状态筛选条件应恢复"
+        assert restored_filters.get("project") == "持久化", "项目筛选条件应恢复"
+        print("    ✓ 筛选配置恢复成功")
+
+        restored_export = service2.get_export_config()
+        print(f"    恢复的导出配置: {restored_export}")
+        assert restored_export.get("directory") == "/test/export", "导出目录应恢复"
+        assert restored_export.get("format") == "json", "导出格式应恢复"
+        assert restored_export.get("filters", {}).get("batch_no") == "BATCH-P", "导出筛选中的批次号应恢复"
+        print("    ✓ 导出配置恢复成功")
+
+        print("\n  测试空筛选配置持久化:")
+        service2.save_filter_config({})
+        Database._instance = None
+        db3 = Database(db_path)
+        service3 = SampleService()
+        empty_filters = service3.get_filter_config()
+        print(f"    恢复的空筛选配置: {empty_filters}")
+        assert empty_filters == {}, "空筛选配置应恢复为空"
+        print("    ✓ 空筛选配置恢复成功")
+
+        print("\n  测试筛选配置持久化后的查询验证:")
+        today = date.today().isoformat()
+        filters_with_date = {
+            "batch_no": "BATCH-P-001",
+            "batch_no_exact": True,
+            "date_from": "2020-01-01",
+            "date_to": today
+        }
+        service3.save_filter_config(filters_with_date)
+        result = service3.get_samples(filters_with_date)
+        nos = sorted([s["sample_no"] for s in result])
+        print(f"    查询结果: {nos}")
+        assert len(result) == 1, f"精确查询应返回1条，实际{len(result)}条"
+        assert "PERSIST-001" in nos
+        print("    ✓ 持久化的筛选配置可正确用于查询")
+
+        Database._instance = None
+        db4 = Database(db_path)
+        service4 = SampleService()
+        restored_with_date = service4.get_filter_config()
+        print(f"    恢复的带日期筛选配置: {restored_with_date}")
+        assert restored_with_date.get("batch_no") == "BATCH-P-001"
+        assert restored_with_date.get("batch_no_exact") == True
+        assert restored_with_date.get("date_from") == "2020-01-01"
+        assert restored_with_date.get("date_to") == today
+        print("    ✓ 带日期的筛选配置恢复成功")
+
+        print("\n  测试get_all_batch_nos持久化后正确:")
+        batch_nos = service4.get_all_batch_nos()
+        print(f"    批次号列表: {batch_nos}")
+        assert len(batch_nos) == 2
+        assert "BATCH-P-001" in batch_nos
+        assert "BATCH-P-002" in batch_nos
+        print("    ✓ 重启后批次号列表正确")
+
+        print("\n  回归测试 11 通过 ✓\n")
+        return True
+
+    finally:
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+
+
 def main():
     print("\n" + "=" * 70)
     print("Bug 修复回归测试")
@@ -942,6 +1583,61 @@ def main():
     except Exception as e:
         failed += 1
         print(f"\n❌ 回归测试 6 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_database_migration():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 7 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_batch_no_filter():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 8 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_batch_no_import_export():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 9 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_batch_no_conflict():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 10 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_config_persistence():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 11 异常: {e}\n")
         import traceback
         traceback.print_exc()
 

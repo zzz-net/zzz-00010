@@ -66,6 +66,12 @@ class SampleService:
             if len(data["project"]) > 100:
                 errors.append("项目名称不能超过100字符")
 
+        if "batch_no" in data and data["batch_no"]:
+            if len(data["batch_no"]) > 50:
+                errors.append("批次号不能超过50字符")
+            if not re.match(r'^[A-Za-z0-9_\-]{0,50}$', data["batch_no"]):
+                errors.append("批次号只能包含字母、数字、下划线和短横线，长度不超过50")
+
         return len(errors) == 0, errors
 
     def register_sample(self, data: Dict[str, Any], operator: str) -> Tuple[bool, str, Optional[int]]:
@@ -241,3 +247,15 @@ class SampleService:
     def set_operator(self, operator: str) -> None:
         """保存操作员"""
         self.db.set_config("operator", operator)
+
+    def get_all_batch_nos(self) -> List[str]:
+        """获取所有批次号"""
+        return self.db.get_all_batch_nos()
+
+    def save_filter_config(self, filters: Dict[str, Any]) -> None:
+        """保存筛选配置"""
+        self.db.set_config("filter_config", filters)
+
+    def get_filter_config(self) -> Dict[str, Any]:
+        """获取上次筛选配置"""
+        return self.db.get_config("filter_config", {})

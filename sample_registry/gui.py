@@ -25,7 +25,31 @@ class SampleRegistryApp:
 
         self._setup_styles()
         self._build_ui()
+        self._restore_filter_config()
         self._refresh_samples()
+
+    def _restore_filter_config(self):
+        filters = self.service.get_filter_config()
+        if filters:
+            if filters.get("status"):
+                self.status_var.set(STATUS_MAP.get(filters["status"], filters["status"]))
+            elif filters.get("status__in") and filters["status__in"] == ["RECEIVED", "PENDING_INFO"]:
+                self.status_var.set("待处理")
+
+            if filters.get("project"):
+                self.project_var.set(filters["project"])
+
+            if filters.get("batch_no"):
+                self.batch_no_var.set(filters["batch_no"])
+                self.batch_no_exact_var.set(filters.get("batch_no_exact", False))
+
+            if filters.get("date_from"):
+                self.date_from_var.set(filters["date_from"])
+
+            if filters.get("date_to"):
+                self.date_to_var.set(filters["date_to"])
+
+            self.current_filters = filters
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -71,25 +95,34 @@ class SampleRegistryApp:
         self.project_combo.grid(row=0, column=3, padx=5, pady=5)
         self._refresh_projects()
 
-        ttk.Label(filter_frame, text="日期从:").grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(filter_frame, text="批次号:").grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
+        self.batch_no_var = tk.StringVar()
+        self.batch_no_combo = ttk.Combobox(filter_frame, textvariable=self.batch_no_var, width=15)
+        self.batch_no_combo.grid(row=0, column=5, padx=5, pady=5)
+
+        self.batch_no_exact_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filter_frame, text="精确匹配", variable=self.batch_no_exact_var).grid(row=0, column=6, padx=5, pady=5)
+
+        ttk.Label(filter_frame, text="日期从:").grid(row=0, column=7, padx=5, pady=5, sticky=tk.W)
         self.date_from_var = tk.StringVar()
-        ttk.Entry(filter_frame, textvariable=self.date_from_var, width=12).grid(row=0, column=5, padx=5, pady=5)
+        ttk.Entry(filter_frame, textvariable=self.date_from_var, width=12).grid(row=0, column=8, padx=5, pady=5)
 
-        ttk.Label(filter_frame, text="到:").grid(row=0, column=6, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(filter_frame, text="到:").grid(row=0, column=9, padx=5, pady=5, sticky=tk.W)
         self.date_to_var = tk.StringVar()
-        ttk.Entry(filter_frame, textvariable=self.date_to_var, width=12).grid(row=0, column=7, padx=5, pady=5)
+        ttk.Entry(filter_frame, textvariable=self.date_to_var, width=12).grid(row=0, column=10, padx=5, pady=5)
 
-        ttk.Button(filter_frame, text="🔍 查询", command=self._apply_filters).grid(row=0, column=8, padx=10, pady=5)
-        ttk.Button(filter_frame, text="🔄 重置", command=self._reset_filters).grid(row=0, column=9, padx=5, pady=5)
+        ttk.Button(filter_frame, text="🔍 查询", command=self._apply_filters).grid(row=0, column=11, padx=10, pady=5)
+        ttk.Button(filter_frame, text="🔄 重置", command=self._reset_filters).grid(row=0, column=12, padx=5, pady=5)
 
         list_frame = ttk.LabelFrame(self.root, text="样本列表", padding="10")
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        columns = ("sample_no", "project", "quantity", "receiver", "location", "status", "created_at", "damage_note", "missing_tube_note")
+        columns = ("sample_no", "batch_no", "project", "quantity", "receiver", "location", "status", "created_at", "damage_note", "missing_tube_note")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
 
         headings = {
             "sample_no": ("样本编号", 120),
+            "batch_no": ("批次号", 120),
             "project": ("项目", 150),
             "quantity": ("数量", 70),
             "receiver": ("接收人", 100),
@@ -150,6 +183,10 @@ class SampleRegistryApp:
         projects = self.service.get_all_projects()
         self.project_combo["values"] = projects
 
+    def _refresh_batch_nos(self):
+        batch_nos = self.service.get_all_batch_nos()
+        self.batch_no_combo["values"] = batch_nos
+
     def _save_operator(self):
         operator = self.operator_var.get().strip()
         if not operator:
@@ -177,6 +214,11 @@ class SampleRegistryApp:
         if project:
             filters["project"] = project
 
+        batch_no = self.batch_no_var.get().strip()
+        if batch_no:
+            filters["batch_no"] = batch_no
+            filters["batch_no_exact"] = self.batch_no_exact_var.get()
+
         date_from = self.date_from_var.get().strip()
         if date_from:
             try:
@@ -196,14 +238,18 @@ class SampleRegistryApp:
                 return
 
         self.current_filters = filters
+        self.service.save_filter_config(filters)
         self._refresh_samples()
 
     def _reset_filters(self):
         self.status_var.set("")
         self.project_var.set("")
+        self.batch_no_var.set("")
+        self.batch_no_exact_var.set(False)
         self.date_from_var.set("")
         self.date_to_var.set("")
         self.current_filters = {}
+        self.service.save_filter_config({})
         self._refresh_samples()
 
     def _refresh_samples(self):
@@ -218,6 +264,7 @@ class SampleRegistryApp:
                 iid=str(s["id"]),
                 values=(
                     s["sample_no"],
+                    s.get("batch_no", "") or "",
                     s["project"],
                     s["quantity"],
                     s["receiver"],
@@ -232,6 +279,7 @@ class SampleRegistryApp:
 
         self._set_status(f"共 {len(samples)} 条记录")
         self._refresh_projects()
+        self._refresh_batch_nos()
         self._update_action_buttons()
 
     def _on_select_sample(self, event):
@@ -277,6 +325,7 @@ class SampleRegistryApp:
 
         fields = [
             ("样本编号 *", "sample_no", "如: TEST-001"),
+            ("批次号", "batch_no", "如: BATCH-2024-001"),
             ("项目 *", "project", "如: 血液检测"),
             ("数量 *", "quantity", "1-10000"),
             ("接收人 *", "receiver", ""),
@@ -402,6 +451,10 @@ class SampleRegistryApp:
                     parts.append(f"状态: 待处理")
                 elif k == "project":
                     parts.append(f"项目: {v}")
+                elif k == "batch_no":
+                    exact = self.current_filters.get("batch_no_exact", False)
+                    match_type = "(精确)" if exact else "(模糊)"
+                    parts.append(f"批次号{match_type}: {v}")
                 elif k == "date_from":
                     parts.append(f"日期从: {v}")
                 elif k == "date_to":
@@ -535,6 +588,7 @@ class SampleRegistryApp:
 
         info_text = (
             f"样本编号: {sample['sample_no']}\n"
+            f"批次号: {sample.get('batch_no', '') or '-'}\n"
             f"项目: {sample['project']}\n"
             f"数量: {sample['quantity']}\n"
             f"接收人: {sample['receiver']}\n"
