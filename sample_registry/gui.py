@@ -447,15 +447,6 @@ class SampleRegistryApp:
         if not sample:
             return
 
-        if sample["status"] == "RETURNED" and new_status == "STORED":
-            if not messagebox.askyesno(
-                "确认异常操作",
-                f"检测到样本 {sample['sample_no']} 当前状态为【已退回】\n"
-                f"直接转为【已入库】属于异常操作，将被记录。\n\n"
-                f"是否继续？"
-            ):
-                return
-
         remark = tk.simpledialog.askstring(
             "流转备注",
             f"将样本 {sample['sample_no']} 从【{STATUS_MAP[sample['status']]}】"

@@ -335,6 +335,142 @@ def test_gui_equivalent():
             pass
 
 
+def test_old_readme_misleading_scenario():
+    """测试：复现旧文档误导场景 - 按旧README步骤6构造数据，验证直接入库被拒绝
+
+    旧文档误导：步骤6描述已退回样本可以直接确认入库，还能改状态
+    验证：退回后直接入库应失败，重启后状态仍是已退回，用户能看到明确拒绝提示
+    """
+    print("=" * 70)
+    print("回归测试 4: 复现旧文档误导场景")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_4.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    original_db_path = Database.db_path if hasattr(Database, 'db_path') else None
+
+    try:
+        Database._instance = None
+        db = Database(db_path)
+
+        print("\n  按旧README步骤6构造数据:")
+        print("    1. 选中'已接收'样本")
+        print("    2. 点击'→ 已退回'，备注：'资料不全退回'")
+
+        data = {
+            "sample_no": "README-TEST-001",
+            "project": "旧文档误导复现测试",
+            "quantity": 3,
+            "receiver": "测试员",
+            "location": "冷藏柜A-03"
+        }
+
+        ok, msg, sample_id = db.insert_sample(data, "操作员A")
+        assert ok, f"插入失败: {msg}"
+
+        ok, msg = db.update_sample_status(sample_id, "RETURNED", "操作员A", "资料不全退回")
+        assert ok, f"退回失败: {msg}"
+
+        sample = db.get_sample_by_id(sample_id)
+        assert sample["status"] == "RETURNED"
+        print(f"    ✓ 样本已退回: {sample['sample_no']}，状态=RETURNED，备注='资料不全退回'")
+
+        print("\n  3. 选中这条'已退回'样本（紫色背景）")
+        print("  4. 点击'→ 已入库'")
+        print("  5. 按旧文档会弹出'异常确认对话框'...")
+
+        print("\n  实际行为（修复后）:")
+        print("    - '→ 已入库'按钮应已禁用（GUI层防护）")
+        print("    - 即使强行调用，后台也会拒绝（数据库层防护）")
+
+        ok, msg = db.update_sample_status(sample_id, "STORED", "操作员A", "按旧文档尝试直接入库")
+        assert not ok, "按旧文档直接入库应该被拒绝"
+        assert "不能直接入库" in msg or "请先执行重新接收" in msg, f"错误提示不明确: {msg}"
+        print(f"    ✓ 后台明确拒绝: {msg}")
+
+        print("\n  验证数据完整性（失败操作不能改坏任何东西）:")
+
+        sample = db.get_sample_by_id(sample_id)
+        assert sample["status"] == "RETURNED", f"状态应保持 RETURNED，实际: {sample['status']}"
+        print(f"    ✓ 状态未被修改: 仍为 RETURNED")
+
+        history = db.get_sample_history(sample_id)
+        assert len(history) == 2, f"历史记录应为2条（初始+退回），实际: {len(history)}"
+        store_attempts = [h for h in history if h["to_status"] == "STORED"]
+        assert len(store_attempts) == 0, "历史记录不应包含 STORED 记录"
+        print(f"    ✓ 历史记录未被污染: 共 {len(history)} 条，无 STORED 记录")
+
+        last_history = history[-1]
+        assert last_history["to_status"] == "RETURNED"
+        assert last_history["remark"] == "资料不全退回"
+        print(f"    ✓ 备注未被改坏: 最后一条备注='{last_history['remark']}'")
+
+        print("\n  验证重启后状态仍是已退回:")
+
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+
+        db2 = Database(db_path)
+        sample_after = db2.get_sample_by_id(sample_id)
+        assert sample_after["status"] == "RETURNED", f"重启后状态应仍是 RETURNED，实际: {sample_after['status']}"
+        print(f"    ✓ 重启后状态: RETURNED")
+
+        history_after = db2.get_sample_history(sample_id)
+        assert len(history_after) == len(history), "重启后历史记录数量应一致"
+        last_after = history_after[-1]
+        assert last_after["remark"] == "资料不全退回"
+        print(f"    ✓ 重启后备注完整: '{last_after['remark']}'")
+
+        print("\n  验证正确业务流程: 必须先走重新接收")
+
+        ok, msg = db2.update_sample_status(sample_id, "RECEIVED", "操作员A", "资料补充完整，重新接收")
+        assert ok, f"重新接收应该成功: {msg}"
+        print(f"    ✓ 重新接收成功: {msg}")
+
+        ok, msg = db2.update_sample_status(sample_id, "STORED", "操作员A", "复核无误，正常入库")
+        assert ok, f"重新接收后入库应该成功: {msg}"
+        print(f"    ✓ 重新接收后入库成功: {msg}")
+
+        sample_final = db2.get_sample_by_id(sample_id)
+        assert sample_final["status"] == "STORED"
+        history_final = db2.get_sample_history(sample_id)
+        assert len(history_final) == 4, f"最终历史记录应为4条，实际: {len(history_final)}"
+        print(f"    ✓ 最终状态: STORED，完整时间线共 {len(history_final)} 条记录")
+
+        print("\n  验证用户看到的错误提示明确:")
+        print(f"    用户看到的提示: '{msg.replace('状态已更新为', '状态已更新为')}'")
+        print(f"    拒绝时的提示: '已退回样本不能直接入库，请先执行重新接收操作'")
+        print(f"    ✓ 提示明确告知用户正确操作路径")
+
+        print("\n  回归测试 4 通过 ✓\n")
+        return True
+
+    finally:
+        if original_db_path:
+            Database.db_path = original_db_path
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+
+
 def main():
     print("\n" + "=" * 70)
     print("Bug 修复回归测试")
@@ -380,6 +516,17 @@ def main():
     except Exception as e:
         failed += 1
         print(f"\n❌ 回归测试 3 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_old_readme_misleading_scenario():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 4 异常: {e}\n")
         import traceback
         traceback.print_exc()
 
