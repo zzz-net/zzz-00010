@@ -1,4 +1,4 @@
-"""回归测试 - 验证两个 Bug 修复"""
+"""回归测试 - 验证 Bug 修复及文档与代码一致性"""
 
 import os
 import sys
@@ -471,6 +471,169 @@ def test_old_readme_misleading_scenario():
             pass
 
 
+def test_old_description_misleading_failure_path():
+    """测试：复现旧描述误导 - 专门验证失败路径行为与旧文档描述不符
+
+    旧文档误导描述：
+      - "退回样本直接入库：异常操作需二次确认，并记录异常标记"
+      - "异常记录：退回样本直接入库...等"
+
+    真实行为（必须验证）：
+      1. 没有二次确认对话框
+      2. 没有异常标记记录
+      3. 直接入库失败，返回明确中文提示
+      4. 状态、历史、备注完全不变
+      5. 重启后仍是已退回状态
+      6. 必须先走重新接收才能入库
+    """
+    print("=" * 70)
+    print("回归测试 5: 复现旧描述误导（失败路径）")
+    print("=" * 70)
+
+    db_path = os.path.join(os.path.dirname(__file__), "test_regression_5.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    original_db_path = Database.db_path if hasattr(Database, 'db_path') else None
+
+    try:
+        Database._instance = None
+        db = Database(db_path)
+
+        print("\n  构造测试数据:")
+        data = {
+            "sample_no": "FAIL-PATH-001",
+            "project": "失败路径验证",
+            "quantity": 2,
+            "receiver": "测试员",
+            "location": "位置A"
+        }
+
+        ok, msg, sample_id = db.insert_sample(data, "操作员B")
+        assert ok, f"插入失败: {msg}"
+
+        ok, msg = db.update_sample_status(sample_id, "RETURNED", "操作员B", "资料不全，退回")
+        assert ok, f"退回失败: {msg}"
+
+        sample_before = db.get_sample_by_id(sample_id)
+        history_before = db.get_sample_history(sample_id)
+        damage_note_before = sample_before["damage_note"]
+        missing_note_before = sample_before["missing_tube_note"]
+        status_before = sample_before["status"]
+
+        print(f"    ✓ 初始状态: {status_before}，历史记录 {len(history_before)} 条")
+        print(f"      破损备注='{damage_note_before or ''}'，缺管备注='{missing_note_before or ''}'")
+
+        print("\n  验证 1: 直接入库被明确拒绝（没有二次确认）:")
+        print("    旧文档说：'异常操作需二次确认'")
+        print("    真实行为：直接返回错误，没有确认步骤")
+
+        ok, msg = db.update_sample_status(sample_id, "STORED", "操作员B", "尝试直接入库")
+        assert not ok, "退回样本直接入库必须失败"
+        assert "不能直接入库" in msg, f"错误提示应包含'不能直接入库'，实际: {msg}"
+        assert "请先执行重新接收" in msg, f"错误提示应告知正确路径，实际: {msg}"
+        print(f"    ✓ 直接被拒绝，无确认步骤: {msg}")
+
+        print("\n  验证 2: 没有异常标记记录:")
+        print("    旧文档说：'记录异常标记'")
+        print("    真实行为：数据库中没有任何异常标记")
+
+        sample_after = db.get_sample_by_id(sample_id)
+        history_after = db.get_sample_history(sample_id)
+
+        assert len(history_after) == len(history_before), f"历史记录数不应变化，应为 {len(history_before)}，实际 {len(history_after)}"
+
+        for h in history_after:
+            assert h["exception_type"] is None or h["exception_type"] == "", f"历史记录不应有异常标记，实际: {h['exception_type']}"
+
+        print(f"    ✓ 历史记录数未变: {len(history_after)} 条")
+        print(f"    ✓ 所有历史记录 exception_type 均为 None")
+
+        print("\n  验证 3: 状态、历史、备注完全不变:")
+        print("    旧文档暗示操作会改变状态并记录")
+        print("    真实行为：失败操作不修改任何数据")
+
+        assert sample_after["status"] == status_before, f"状态应保持 {status_before}，实际: {sample_after['status']}"
+        assert sample_after["damage_note"] == damage_note_before, f"破损备注应保持 '{damage_note_before or ''}'，实际: '{sample_after['damage_note'] or ''}'"
+        assert sample_after["missing_tube_note"] == missing_note_before, f"缺管备注应保持 '{missing_note_before or ''}'，实际: '{sample_after['missing_tube_note'] or ''}'"
+        assert len(history_after) == len(history_before), "历史记录数不应变化"
+
+        last_history = history_after[-1]
+        assert last_history["to_status"] == "RETURNED", f"最后一条历史应为 RETURNED，实际: {last_history['to_status']}"
+        assert last_history["remark"] == "资料不全，退回", f"备注应保持 '资料不全，退回'，实际: '{last_history['remark']}'"
+
+        print(f"    ✓ 状态未变: {sample_after['status']}")
+        print(f"    ✓ 破损备注未变: '{sample_after['damage_note'] or ''}'")
+        print(f"    ✓ 缺管备注未变: '{sample_after['missing_tube_note'] or ''}'")
+        print(f"    ✓ 最后一条历史: {last_history['to_status']} - '{last_history['remark']}'")
+
+        print("\n  验证 4: 重启后仍是已退回状态:")
+
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+
+        db2 = Database(db_path)
+        sample_restart = db2.get_sample_by_id(sample_id)
+        history_restart = db2.get_sample_history(sample_id)
+
+        assert sample_restart["status"] == "RETURNED", f"重启后状态应仍是 RETURNED，实际: {sample_restart['status']}"
+        assert len(history_restart) == len(history_before), f"重启后历史记录数应一致"
+        assert history_restart[-1]["remark"] == "资料不全，退回"
+
+        print(f"    ✓ 重启后状态: {sample_restart['status']}")
+        print(f"    ✓ 重启后历史: {len(history_restart)} 条，最后一条='{history_restart[-1]['remark']}'")
+
+        print("\n  验证 5: 正确路径 - 必须先走重新接收:")
+
+        ok, msg = db2.update_sample_status(sample_id, "RECEIVED", "操作员B", "资料补充完整，重新接收")
+        assert ok, f"重新接收应该成功: {msg}"
+        print(f"    ✓ 重新接收成功: {msg}")
+
+        ok, msg = db2.update_sample_status(sample_id, "STORED", "操作员B", "复核无误，正常入库")
+        assert ok, f"重新接收后入库应该成功: {msg}"
+        print(f"    ✓ 重新接收后入库成功: {msg}")
+
+        sample_final = db2.get_sample_by_id(sample_id)
+        history_final = db2.get_sample_history(sample_id)
+        assert sample_final["status"] == "STORED"
+        assert len(history_final) == 4, f"最终应有4条历史记录，实际: {len(history_final)}"
+
+        print(f"    ✓ 最终状态: {sample_final['status']}")
+        print(f"    ✓ 完整时间线: {len(history_final)} 条记录")
+        for i, h in enumerate(history_final):
+            print(f"      {i+1}. {h['from_status']} → {h['to_status']}: {h['remark']}")
+
+        print("\n  验证 6: 用户看到的提示明确:")
+        print(f"    拒绝提示: '已退回样本不能直接入库，请先执行重新接收操作'")
+        print(f"    ✓ 提示明确告知用户：是什么问题 + 应该怎么做")
+
+        print("\n  回归测试 5 通过 ✓\n")
+        return True
+
+    finally:
+        if original_db_path:
+            Database.db_path = original_db_path
+        try:
+            if Database._instance:
+                conn = getattr(Database._instance, '_conn', None)
+                if conn:
+                    conn.close()
+        except:
+            pass
+        Database._instance = None
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except:
+            pass
+
+
 def main():
     print("\n" + "=" * 70)
     print("Bug 修复回归测试")
@@ -527,6 +690,17 @@ def main():
     except Exception as e:
         failed += 1
         print(f"\n❌ 回归测试 4 异常: {e}\n")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        if test_old_description_misleading_failure_path():
+            passed += 1
+        else:
+            failed += 1
+    except Exception as e:
+        failed += 1
+        print(f"\n❌ 回归测试 5 异常: {e}\n")
         import traceback
         traceback.print_exc()
 
